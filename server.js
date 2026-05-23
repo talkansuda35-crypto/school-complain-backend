@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2');
+const pg = require('pg'); // เปลี่ยนจาก mysql2 เป็น pg สำหรับ PostgreSQL
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
@@ -27,17 +27,22 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// เชื่อมต่อฐานข้อมูล MySQL
-const db = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: '',
-    database: 'school_complain'
+// เชื่อมต่อฐานข้อมูล PostgreSQL ผ่าน Environment Variable บน Render
+const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false // จำเป็นสำหรับการเชื่อมต่อฐานข้อมูลบนระบบ Cloud อย่างปลอดภัย
+    }
 });
 
-db.connect((err) => {
-    if (err) console.log('❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ:', err.message);
-    else console.log('🚀 [Database] เชื่อมต่อสำเร็จ! รองรับรูปภาพและรหัสนักศึกษาเรียบร้อย');
+// ตรวจสอบการเชื่อมต่อกับฐานข้อมูล
+pool.connect((err, client, release) => {
+    if (err) {
+        console.log('❌ เชื่อมต่อฐานข้อมูล PostgreSQL ไม่สำเร็จ:', err.message);
+    } else {
+        console.log('🚀 [Database] เชื่อมต่อ PostgreSQL บนระบบ Cloud สำเร็จเรียบร้อยแล้ว!');
+        release();
+    }
 });
 
 // ตั้งค่าการส่งอีเมลผ่าน Gmail
@@ -57,10 +62,12 @@ app.post('/api/complaints', upload.single('image'), (req, res) => {
     const defaultStatus = 'รอการดำเนินการ';
     const imageName = req.file ? req.file.filename : null;
 
-    // นำค่า student_id ไปบันทึกลงคอลัมน์ reporter_phone ในตารางเดิมได้เลย
-    const sql = "INSERT INTO complaints (title, category, reporter_name, reporter_phone, description, image_path, is_anonymous, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    // แก้ไขโครงสร้างการ Query ให้เข้ากับไวยากรณ์ของ PostgreSQL (เปลี่ยน ? เป็น $1, $2, $3...)
+    const sql = `INSERT INTO complaints (title, category, reporter_name, reporter_phone, description, image_path, is_anonymous, status) 
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
     
-    db.query(sql, [title, category, reporter_name, student_id, description, imageName, anonymousValue, defaultStatus], (err, result) => {
+    // เปลี่ยนจาก db.query เป็น pool.query
+    pool.query(sql, [title, category, reporter_name, student_id, description, imageName, anonymousValue, defaultStatus], (err, result) => {
         if (err) {
             console.error('❌ [SQL Error]:', err.message);
             return res.status(500).json({ success: false, message: 'บันทึกข้อมูลผิดพลาด: ' + err.message });
@@ -91,38 +98,38 @@ app.post('/api/complaints', upload.single('image'), (req, res) => {
                     <table style="width: 100%; border-collapse: collapse; font-size: 15px; margin-bottom: 25px;">
                         <tr>
                             <td style="width: 25%; padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">ชื่อผู้แจ้ง:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #1e3a8a; font-weight: bold;">${reporter_name}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #1e3a8a; font-weight: bold;">\${reporter_name}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">รหัสนักศึกษา:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #333;">${student_id}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #333;">\${student_id}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">หัวข้อเรื่อง:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #333;">${title}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #333;">\${title}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">หมวดหมู่:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #555;">📌 ${category}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #555;">📌 \${category}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">รายละเอียด:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #555; white-space: pre-line;">${description}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #555; white-space: pre-line;">\${description}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">ภาพประกอบ:</td>
-                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0;">${emailImageHTML}</td>
+                            <td style="padding: 12px 15px; border: 1px solid #e0e0e0;">\${emailImageHTML}</td>
                         </tr>
                         <tr>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; font-weight: bold; background-color: #f9f9f9;">การแสดงตัวตน:</td>
                             <td style="padding: 12px 15px; border: 1px solid #e0e0e0; color: #555;">
-                                ${anonymousValue ? '👤 ปกปิดตัวตน' : '🔓 เปิดเผยตัวตน'}
+                                \${anonymousValue ? '👤 ปกปิดตัวตน' : '🔓 เปิดเผยตัวตน'}
                             </td>
                         </tr>
                     </table>
                     
                     <p style="font-size: 13px; color: #888888; border-top: 1px solid #eeeeee; padding-top: 15px;">
-                        ระบบแจ้งเตือนอัตโนมัติจากระบบโรงเรียน • ${new Date().toLocaleDateString('th-TH')}
+                        ระบบแจ้งเตือนอัตโนมัติจากระบบโรงเรียน • \${new Date().toLocaleDateString('th-TH')}
                     </p>
                 </div>
             `,
@@ -140,9 +147,10 @@ app.post('/api/complaints', upload.single('image'), (req, res) => {
 
 // API สำหรับดึงข้อมูลไปแสดงที่หน้าแอดมิน
 app.get('/api/complaints', (req, res) => {
-    db.query("SELECT * FROM complaints ORDER BY id DESC", (err, results) => {
+    // เปลี่ยนจาก db.query เป็น pool.query
+    pool.query("SELECT * FROM complaints ORDER BY id DESC", (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json(results);
+        res.json(results.rows); // โครงสร้างผลลัพธ์ของ pg จะอยู่ใน .rows ครับ
     });
 });
 
@@ -150,7 +158,8 @@ app.get('/api/complaints', (req, res) => {
 app.put('/api/complaints/:id/status', (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
-    db.query("UPDATE complaints SET status = ? WHERE id = ?", [status, id], (err) => {
+    // เปลี่ยนเครื่องหมาย ? เป็น $1, $2 และใช้ pool.query
+    pool.query("UPDATE complaints SET status = $1 WHERE id = $2", [status, id], (err) => {
         if (err) return res.status(500).json({ success: false });
         res.json({ success: true });
     });
