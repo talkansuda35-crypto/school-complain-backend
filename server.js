@@ -1,5 +1,5 @@
 const express = require('express');
-const pg = require('pg'); // เปลี่ยนจาก mysql2 เป็น pg สำหรับ PostgreSQL
+const pg = require('pg'); // ใช้ pg แทน mysql2 สำหรับ PostgreSQL บน Cloud
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
@@ -31,17 +31,41 @@ const upload = multer({ storage: storage });
 const pool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-        rejectUnauthorized: false // จำเป็นสำหรับการเชื่อมต่อฐานข้อมูลบนระบบ Cloud อย่างปลอดภัย
+        rejectUnauthorized: false // จำเป็นสำหรับการเชื่อมต่อบนระบบ Cloud อย่างปลอดภัย
     }
 });
 
-// ตรวจสอบการเชื่อมต่อกับฐานข้อมูล
+// ตรวจสอบการเชื่อมต่อ และสร้างตารางอัตโนมัติ (แก้ปัญหาตารางหาย)
 pool.connect((err, client, release) => {
     if (err) {
         console.log('❌ เชื่อมต่อฐานข้อมูล PostgreSQL ไม่สำเร็จ:', err.message);
     } else {
-        console.log('🚀 [Database] เชื่อมต่อ PostgreSQL บนระบบ Cloud สำเร็จเรียบร้อยแล้ว!');
-        release();
+        console.log('🚀 [Database] เชื่อมต่อ PostgreSQL สำเร็จ! กำลังตรวจสอบโครงสร้างตาราง...');
+        
+        // คำสั่งสร้างตาราง complaints อัตโนมัติถ้ายังไม่มีในฐานข้อมูลใหม่
+        const createTableSql = `
+            CREATE TABLE IF NOT EXISTS complaints (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                category VARCHAR(255) NOT NULL,
+                reporter_name VARCHAR(255),
+                reporter_phone VARCHAR(255),
+                description TEXT,
+                image_path VARCHAR(255),
+                is_anonymous INT DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'รอการดำเนินการ',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `;
+        
+        client.query(createTableSql, (tableErr) => {
+            release(); // คืนการเชื่อมต่อให้ระบบ
+            if (tableErr) {
+                console.log('❌ สร้างตารางไม่สำเร็จ:', tableErr.message);
+            } else {
+                console.log('🚀 [Database] เชื่อมต่อสำเร็จ! ตาราง complaints พร้อมใช้งานร้อยเปอร์เซ็นต์');
+            }
+        });
     }
 });
 
@@ -56,17 +80,15 @@ const transporter = nodemailer.createTransport({
 
 // 🌟 API บันทึกเรื่องร้องเรียน (เวอร์ชันปรับปรุง: รับ student_id แทนเบอร์โทร)
 app.post('/api/complaints', upload.single('image'), (req, res) => {
-    // รับค่า student_id มาจากหน้าบ้าน
     const { title, category, description, is_anonymous, reporter_name, student_id } = req.body;
     const anonymousValue = is_anonymous === 'true' || is_anonymous === '1' ? 1 : 0;
     const defaultStatus = 'รอการดำเนินการ';
     const imageName = req.file ? req.file.filename : null;
 
-    // แก้ไขโครงสร้างการ Query ให้เข้ากับไวยากรณ์ของ PostgreSQL (เปลี่ยน ? เป็น $1, $2, $3...)
+    // ปรับรูปแบบ Query ให้รองรับไวยากรณ์ของ PostgreSQL (ใช้ $1, $2, $3 แทน ?)
     const sql = `INSERT INTO complaints (title, category, reporter_name, reporter_phone, description, image_path, is_anonymous, status) 
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
     
-    // เปลี่ยนจาก db.query เป็น pool.query
     pool.query(sql, [title, category, reporter_name, student_id, description, imageName, anonymousValue, defaultStatus], (err, result) => {
         if (err) {
             console.error('❌ [SQL Error]:', err.message);
@@ -86,7 +108,7 @@ app.post('/api/complaints', upload.single('image'), (req, res) => {
             emailImageHTML = `<img src="cid:complaint_image" style="max-width: 100%; border-radius: 8px; margin-top: 10px; border: 1px solid #ddd;" />`;
         }
 
-        // หน้าตาตารางในอีเมล แจ้งเตือนแอดมิน (เปลี่ยนเป็นหัวข้อ รหัสนักศึกษา)
+        // หน้าตาตารางในอีเมล แจ้งเตือนแอดมิน
         const mailOptions = {
             from: 'talkansuda35@gmail.com',
             to: 'talkansuda35@gmail.com',
@@ -147,10 +169,9 @@ app.post('/api/complaints', upload.single('image'), (req, res) => {
 
 // API สำหรับดึงข้อมูลไปแสดงที่หน้าแอดมิน
 app.get('/api/complaints', (req, res) => {
-    // เปลี่ยนจาก db.query เป็น pool.query
     pool.query("SELECT * FROM complaints ORDER BY id DESC", (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json(results.rows); // โครงสร้างผลลัพธ์ของ pg จะอยู่ใน .rows ครับ
+        res.json(results.rows); // ดึงข้อมูลโครงสร้าง .rows ของไลบรารี pg
     });
 });
 
@@ -158,7 +179,6 @@ app.get('/api/complaints', (req, res) => {
 app.put('/api/complaints/:id/status', (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
-    // เปลี่ยนเครื่องหมาย ? เป็น $1, $2 และใช้ pool.query
     pool.query("UPDATE complaints SET status = $1 WHERE id = $2", [status, id], (err) => {
         if (err) return res.status(500).json({ success: false });
         res.json({ success: true });
